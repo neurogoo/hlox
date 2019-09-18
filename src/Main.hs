@@ -17,12 +17,15 @@ import Debug.Trace
 import Text.Read (readMaybe)
 
 import Types
+import Parser
 
 import qualified Data.Text as T
 import qualified Data.Map as Map
 
-error :: Int -> T.Text -> IO ()
-error line message = report line "" message
+error :: Either Int Token -> T.Text -> IO ()
+error (Left line) message = report line "" message
+error (Right (Token Eof _ _ line)) message = report line " at end" message
+error (Right (Token _ lexeme _ line)) message = report line (" at '" <> lexeme <> "'") message
 
 report :: Int -> T.Text -> T.Text -> IO ()
 report line where_ message =
@@ -184,10 +187,13 @@ runFile filename = do
 
 run :: T.Text -> IO Bool
 run sourceString = do
-  let (tokens, errors) = runWriter $ scanTokens sourceString
-  forM_ errors $ uncurry Main.error
-  forM_ tokens $ \token -> do
+  let (tokens', errors) = runWriter $ scanTokens sourceString
+  forM_ errors $ \(l,e) -> Main.error (Left l) e
+  forM_ tokens' $ \token -> do
     print token
+  case parse tokens' of
+    Right expr -> print $ printAst expr
+    Left (token, message) -> Main.error (Right token) message
   pure $ null errors
 
 runPrompt :: IO ()
