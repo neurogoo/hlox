@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TemplateHaskell   #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleContexts  #-}
+{-# LANGUAGE ConstraintKinds   #-}
 module Parser where
 
 import Control.Lens
@@ -79,6 +80,27 @@ findUntil f tokenTypes = do
 expression :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m Expr
 expression = equality
 
+statement :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m Stmt
+statement = do
+  x <- match PRINT
+  case x of
+    Left token -> printStatement
+    _ -> expressionStatement
+
+type ParserConstrains m = (Monad m, MonadParser m, MonadError (Token, T.Text) m)
+
+printStatement :: ParserConstrains m => m Stmt
+printStatement = do
+  value <- expression
+  _ <- consume Semicolon "Expect ';' after value."
+  pure $ Print value
+
+expressionStatement :: ParserConstrains m => m Stmt
+expressionStatement = do
+  value <- expression
+  _ <- consume Semicolon "Expect ';' after expression."
+  pure $ Expression value
+
 equality :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m Expr
 equality = findUntil comparison [BangEqual,EqualEqual]
 
@@ -135,8 +157,16 @@ primary = do
           pure $ Just $ Grouping expr
         Right () -> pure Nothing
 
-parse :: [Token] -> Either (Token, T.Text) Expr
-parse ts = flip evalStateT (Parser ts Nothing) $ expression
+parse :: [Token] -> Either (Token, T.Text) [Stmt]
+parse ts = flip evalStateT (Parser ts Nothing) $ program []
+  where
+    program ss = do
+      p <- peek
+      case p of
+        (Token Eof _ _ _) -> pure ss
+        _ -> do
+          s <- statement
+          program (ss <> [s])
 
 synchronize :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m ()
 synchronize = do
@@ -155,7 +185,7 @@ synchronize = do
             For -> pure ()
             If -> pure ()
             While -> pure ()
-            Print -> pure ()
+            PRINT -> pure ()
             Return -> pure ()
             _ -> do
               t'' <- advance

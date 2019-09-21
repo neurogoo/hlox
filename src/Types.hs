@@ -13,6 +13,10 @@ data LiteralType = TextLiteral T.Text
                  | EmptyLiteral
                  deriving Show
 
+data ErrorType = ScanError Int T.Text
+               | ParserError Token T.Text
+               | RuntimeError Token T.Text
+
 instance Show Token where
   show (Token tokenType lexeme literal _) =
     show tokenType <> " " <> T.unpack lexeme <> " " <> show literal
@@ -48,7 +52,7 @@ data TokenType = LeftParen -- Single character tokens
                | If
                | Nil
                | Or
-               | Print
+               | PRINT
                | Return
                | Super
                | This
@@ -78,7 +82,7 @@ keywords = Map.fromList
   , ("if", If)
   , ("nil", Nil)
   , ("or", Or)
-  , ("print", Print)
+  , ("print", PRINT)
   , ("return", Return)
   , ("super", Super)
   , ("this", This)
@@ -91,6 +95,9 @@ data Expr = Binary Expr Token Expr
           | Grouping Expr
           | Literal LiteralType
           | Unary Token Expr
+
+data Stmt = Expression Expr
+          | Print Expr
 
 parenthesize :: T.Text -> [Expr] -> T.Text
 parenthesize name exprs = "(" <> name <> " " <> T.intercalate " " (printAst <$> exprs) <> " )"

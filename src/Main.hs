@@ -15,17 +15,21 @@ import Control.Lens
 import Data.Maybe (catMaybes)
 import Debug.Trace
 import Text.Read (readMaybe)
+import Control.Monad.Except
 
 import Types
 import Parser
+import Interpreter
 
 import qualified Data.Text as T
 import qualified Data.Map as Map
 
-error :: Either Int Token -> T.Text -> IO ()
-error (Left line) message = report line "" message
-error (Right (Token Eof _ _ line)) message = report line " at end" message
-error (Right (Token _ lexeme _ line)) message = report line (" at '" <> lexeme <> "'") message
+error :: ErrorType -> IO ()
+error (ScanError line message) = report line "" message
+error (ParserError (Token Eof _ _ line) message) = report line " at end" message
+error (ParserError (Token _ lexeme _ line) message) = report line (" at '" <> lexeme <> "'") message
+error (RuntimeError (Token _ _ _ line) message) =
+  putStrLn (T.unpack message <> "\n[line " <> show line <> "]")
 
 report :: Int -> T.Text -> T.Text -> IO ()
 report line where_ message =
@@ -179,22 +183,35 @@ scanTokens sourceString = go [] initialState
       }
     endToken = Token Eof "" Nothing
 
+data HadError = HadParseError
+              | HadRuntimeError
+
 runFile :: String -> IO ()
 runFile filename = do
   fileData <- Data.Text.IO.readFile filename
   hadError <- run fileData
-  if hadError then exitWith (ExitFailure 65) else pure ()
+  case hadError of
+    Nothing -> pure ()
+    Just HadRuntimeError -> exitWith (ExitFailure 70)
+    _ -> exitWith (ExitFailure 65)
 
-run :: T.Text -> IO Bool
+run :: T.Text -> IO (Maybe HadError)
 run sourceString = do
   let (tokens', errors) = runWriter $ scanTokens sourceString
-  forM_ errors $ \(l,e) -> Main.error (Left l) e
-  forM_ tokens' $ \token -> do
-    print token
+  forM_ errors $ \(l,e) -> Main.error $ ScanError l e
+  -- forM_ tokens' $ \token -> do
+  --   print token
   case parse tokens' of
-    Right expr -> print $ printAst expr
-    Left (token, message) -> Main.error (Right token) message
-  pure $ null errors
+    Left (token, message) -> do
+      _ <- Main.error $ ParserError token message
+      pure $ Just $ HadParseError
+    Right ss -> do
+      x <- liftIO $ runExceptT $ interpret ss
+      case x of --print $ printAst expr
+        Left err -> do
+          _ <- Main.error err
+          pure $ Just HadRuntimeError
+        Right _ -> pure $ if null errors then Nothing else Just HadParseError
 
 runPrompt :: IO ()
 runPrompt = forever $ do
