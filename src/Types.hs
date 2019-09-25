@@ -3,6 +3,7 @@
 module Types where
 
 import Control.Lens
+import Data.Maybe (catMaybes)
 
 import qualified Data.Text as T
 import qualified Data.Map as Map
@@ -57,7 +58,7 @@ data TokenType = LeftParen -- Single character tokens
                | Super
                | This
                | TRUE
-               | Var
+               | VAR
                | While
                | Eof
                deriving (Eq, Ord, Show)
@@ -87,20 +88,32 @@ keywords = Map.fromList
   , ("super", Super)
   , ("this", This)
   , ("true", TRUE)
-  , ("var", Var)
+  , ("var", VAR)
   , ("while", While)
   ]
 
-data Expr = Binary Expr Token Expr
+data Expr = Assign Token Expr
+          | Binary Expr Token Expr
           | Grouping Expr
           | Literal LiteralType
           | Unary Token Expr
+          | Variable Token
+          deriving Show
 
 data Stmt = Expression Expr
           | Print Expr
+          | Var Token (Maybe Expr)
+          | EmptyStatement
+          deriving Show
 
 parenthesize :: T.Text -> [Expr] -> T.Text
 parenthesize name exprs = "(" <> name <> " " <> T.intercalate " " (printAst <$> exprs) <> " )"
+
+printAstStmt :: Stmt -> T.Text
+printAstStmt (Expression expr) = printAst expr
+printAstStmt (Print expr) = parenthesize "print" [expr]
+printAstStmt (Var (Token _ lexeme' _ _) expr) = parenthesize ("var " <> lexeme') $ catMaybes [expr]
+printAstStmt EmptyStatement = "ErrorStmt"
 
 printAst :: Expr -> T.Text
 printAst (Binary left operator right) = parenthesize
@@ -112,6 +125,7 @@ printAst (Literal (TextLiteral t)) = t
 printAst (Literal (NumericLiteral n)) = T.pack $ show n
 printAst (Literal (BooleanLiteral b)) = T.pack $ show b
 printAst (Unary operator right) = parenthesize (operator ^. lexeme) [right]
+printAst (Variable token) = token ^. lexeme
 
 testAstPrinter :: T.Text
 testAstPrinter = printAst $ Binary

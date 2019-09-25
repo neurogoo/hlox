@@ -6,9 +6,8 @@
 module Parser where
 
 import Control.Lens
-import Data.Maybe (fromMaybe, fromJust, listToMaybe)
+import Data.Maybe (listToMaybe)
 import Control.Monad.State.Strict
-import Control.Monad.Reader.Class
 import Debug.Trace
 import Control.Monad.Except
 
@@ -19,6 +18,7 @@ import qualified Data.Text as T
 data Parser = Parser
   { _tokens :: ![Token]
   , _prev   :: !(Maybe Token)
+  , _errors :: [(Token,T.Text)]
   }
 
 makeLenses ''Parser
@@ -27,6 +27,7 @@ class MonadParser m where
   match      :: TokenType -> m (Either Token ())
   peek       :: m Token
   advance    :: m Token
+  parseError :: (Token, T.Text) -> m ()
 
 instance (Monad m) => MonadParser (StateT Parser m) where
   match tt = do
@@ -48,21 +49,29 @@ instance (Monad m) => MonadParser (StateT Parser m) where
         tokens %= drop 1
         pure x
       _ -> error "This should not happen"
+  parseError err = errors <>= [err]
 
-consume :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => TokenType -> T.Text -> m Token
+type ParserConstrains m = (Monad m, MonadParser m, MonadError (Token, T.Text) m)
+
+throwParseError :: (MonadParser m, MonadError (Token,T.Text) m) => (Token, T.Text) -> m a
+throwParseError err = do
+  parseError err
+  throwError err
+
+consume :: ParserConstrains m => TokenType -> T.Text -> m Token
 consume tt errorMessage = do
   m <- peek
   if m ^. tokenType == tt then
     advance
   else do
-    throwError (m, errorMessage)
+    throwParseError (m, errorMessage)
 
-anyMatches :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => [TokenType] -> m (Either Token ())
+anyMatches :: ParserConstrains m => [TokenType] -> m (Either Token ())
 anyMatches tokenTypes = foldM (\b a -> case b of
                                   Right () -> match a
                                   Left t -> pure $ Left t) (Right ()) tokenTypes
 
-findUntil :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m Expr -> [TokenType] -> m Expr
+findUntil :: ParserConstrains m => m Expr -> [TokenType] -> m Expr
 findUntil f tokenTypes = do
     startVal <- f
     go tokenTypes startVal
@@ -77,17 +86,47 @@ findUntil f tokenTypes = do
         Right () ->
           pure expr
 
-expression :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m Expr
-expression = equality
+expression :: ParserConstrains m => m Expr
+expression = assignment
 
-statement :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m Stmt
+assignment :: ParserConstrains m => m Expr
+assignment = do
+  expr <- equality
+  m <- match Equal
+  case m of
+    Left equals -> do
+      value <- assignment
+      case expr of
+        Variable name -> pure $ Assign name value
+        _ -> throwParseError (equals, "Invalid assignment target.") --TODO: just report error, not throw
+    Right () -> pure expr
+
+declaration :: ParserConstrains m => m Stmt
+declaration = go `catchError` const synchronize
+  where
+    go = do
+      m <- match VAR
+      case m of
+        Left _ -> varDeclaration
+        _ -> statement
+
+varDeclaration :: ParserConstrains m => m Stmt
+varDeclaration = do
+  name <- consume Identifier "Expect variable name."
+  m <- match Equal
+  initializer <-
+    case m of
+      Left _ -> Just <$> expression
+      Right () -> pure $ Nothing
+  void $ consume Semicolon "Expect ';' after variable declaration."
+  pure $ Var name initializer
+
+statement :: ParserConstrains m => m Stmt
 statement = do
   x <- match PRINT
   case x of
-    Left token -> printStatement
+    Left _ -> printStatement
     _ -> expressionStatement
-
-type ParserConstrains m = (Monad m, MonadParser m, MonadError (Token, T.Text) m)
 
 printStatement :: ParserConstrains m => m Stmt
 printStatement = do
@@ -101,92 +140,96 @@ expressionStatement = do
   _ <- consume Semicolon "Expect ';' after expression."
   pure $ Expression value
 
-equality :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m Expr
+equality :: ParserConstrains m => m Expr
 equality = findUntil comparison [BangEqual,EqualEqual]
 
-comparison :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m Expr
+comparison :: ParserConstrains m => m Expr
 comparison = findUntil addition [Greater, GreaterEqual, Less, LessEqual]
 
-addition :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m Expr
+addition :: ParserConstrains m => m Expr
 addition = findUntil multiplication [Minus, Plus]
 
-multiplication :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m Expr
+multiplication :: ParserConstrains m => m Expr
 multiplication = findUntil unary [Slash, Star]
 
-unary :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m Expr
+unary :: ParserConstrains m => m Expr
 unary = do
   matches <- anyMatches [Bang, Minus]
   case matches of
-    Left tokenType -> do
-      let operator = tokenType
+    Left tt -> do
+      let operator = tt
       right <- unary
       pure $ Unary operator right
     Right () -> primary
 
-primary :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m Expr
+primary :: ParserConstrains m => m Expr
 primary = do
-  x <- ifFalse
-  pure $ fromMaybe (Literal EmptyLiteral) x
+  x <- runExceptT $ ExceptT ifFalse
+    >> ExceptT ifTrue
+    >> ExceptT ifNil
+    >> ExceptT ifNumberOrString
+    >> ExceptT ifIdentifier
+    >> ExceptT ifLeftParen
+  case x of
+    Left expr -> pure expr
+    Right _ -> do
+      p <- peek
+      throwParseError (p, "Couldn't find matching primary for token")
   where
-    ifFalse = do
-      m <- match FALSE
+    ifIs tt exprf = do
+      m <- match tt
       case m of
-        Left _ -> pure $ Just $ Literal $ BooleanLiteral False
-        Right () -> ifTrue
-    ifTrue = do
-      m <- match TRUE
-      case m of
-        Left _ -> pure $ Just $ Literal $ BooleanLiteral True
-        Right () -> ifNil
-    ifNil = do
-      m <- match Nil
-      case m of
-        Left _ -> pure $ Just $ Literal $ EmptyLiteral
-        Right () -> ifNumberOrString
+        Left t -> pure $ Left $ exprf t
+        Right _ -> pure $ Right ()
+    ifFalse = ifIs FALSE (const $ Literal $ BooleanLiteral False)
+    ifTrue = ifIs TRUE (const $ Literal $ BooleanLiteral True)
+    ifNil = ifIs Nil (const $ Literal $ EmptyLiteral)
     ifNumberOrString = do
       matches <- anyMatches [Number, String]
       case matches of
-        Left p -> pure $ Literal <$> (p ^. literal)
-        Right () -> ifLeftParen
+        Left (Token _ _ (Just l) _ ) -> pure $ Left $ Literal l
+        _ -> pure $ Right ()
+    ifIdentifier = ifIs Identifier Variable
     ifLeftParen = do
       m <- match LeftParen
       case m of
         Left _ -> do
           expr <- expression
           _ <- consume RightParen "Expect ')' after expression."
-          pure $ Just $ Grouping expr
-        Right () -> pure Nothing
+          pure $ Left $ Grouping expr
+        Right () -> pure $ Right ()
 
 parse :: [Token] -> Either (Token, T.Text) [Stmt]
-parse ts = flip evalStateT (Parser ts Nothing) $ program []
+parse ts = flip evalStateT (Parser ts Nothing []) $ program []
   where
     program ss = do
       p <- peek
       case p of
         (Token Eof _ _ _) -> pure ss
         _ -> do
-          s <- statement
+          s <- declaration
           program (ss <> [s])
 
-synchronize :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m ()
+--TODO: add problem error reporting for this
+synchronize :: (Monad m, MonadParser m, MonadError (Token, T.Text) m) => m Stmt
 synchronize = do
     previous <- advance
     go $ previous ^. tokenType
   where
     go previous = do
       case previous of
-        Semicolon -> pure ()
+        Semicolon -> pure EmptyStatement
         _ -> do
           current <- peek
           case current ^. tokenType of
-            Class -> pure ()
-            Fun -> pure ()
-            Var -> pure ()
-            For -> pure ()
-            If -> pure ()
-            While -> pure ()
-            PRINT -> pure ()
-            Return -> pure ()
+            Class -> pure EmptyStatement
+            Fun -> pure EmptyStatement
+            VAR -> pure EmptyStatement
+            For -> pure EmptyStatement
+            If -> pure EmptyStatement
+            While -> pure EmptyStatement
+            PRINT -> pure EmptyStatement
+            Return -> pure EmptyStatement
             _ -> do
               t'' <- advance
               go $ t'' ^. tokenType

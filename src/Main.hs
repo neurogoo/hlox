@@ -137,7 +137,7 @@ scanToken = do
       case res of
         Just s' -> do
           currentLine <- use line
-          pure $ Just $ Token String (T.pack s') Nothing currentLine
+          pure $ Just $ Token String (T.pack s') (Just $ TextLiteral $ T.pack s') currentLine
         Nothing -> do
           currentLine <- use line
           tell [(currentLine, "Unterminated string.")]
@@ -199,15 +199,16 @@ run :: T.Text -> IO (Maybe HadError)
 run sourceString = do
   let (tokens', errors) = runWriter $ scanTokens sourceString
   forM_ errors $ \(l,e) -> Main.error $ ScanError l e
-  -- forM_ tokens' $ \token -> do
-  --   print token
+--  forM_ tokens' $ \token -> do
+--    print token
   case parse tokens' of
     Left (token, message) -> do
       _ <- Main.error $ ParserError token message
       pure $ Just $ HadParseError
     Right ss -> do
-      x <- liftIO $ runExceptT $ interpret ss
-      case x of --print $ printAst expr
+--      print $ show ss
+      x <- liftIO $ runExceptT $ flip runStateT (Values Map.empty) $ interpret ss
+      case x of
         Left err -> do
           _ <- Main.error err
           pure $ Just HadRuntimeError
