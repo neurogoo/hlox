@@ -32,29 +32,47 @@ instance Show Code where
   show (TextValue t) = T.unpack t
   show VoidValue = "nil"
 
-data Environment = Values (Map.Map T.Text Code)
+data Environment = Environment
+  { values    :: !(Map.Map T.Text Code)
+  , enclosing :: !(Maybe Environment)
+  }
 
 class MonadEnvironment m where
   define      :: T.Text -> Code -> m ()
   getValue    :: Token -> m Code
   assignValue :: Token -> Code -> m ()
+  getEnv      :: m Environment
+  setEnv      :: Environment -> m ()
 
 instance ( Monad m
          , MonadError ErrorType m) => MonadEnvironment (StateT Environment m) where
   define name code = do
-    (Values valMap) <- get
-    put (Values $ Map.insert name code valMap)
+    (Environment valMap enc) <- get
+    put (Environment (Map.insert name code valMap) enc)
   getValue token = do
-    (Values valMap) <- get
-    case Map.lookup (token ^. lexeme) valMap of
-      Just code -> pure code
-      Nothing -> throwError $
-        RuntimeError token ("Undefined variable '" <> token ^. lexeme <> "'.")
+    let lookupEnv (Environment valMap env) =
+          case Map.lookup (token ^. lexeme) valMap of
+            Just code -> pure code
+            Nothing -> case env of
+              Just env' -> lookupEnv env'
+              Nothing -> throwError $
+                RuntimeError token ("Undefined variable '" <> token ^. lexeme <> "'.")
+    env <- get
+    lookupEnv env
   assignValue token code = do
-    (Values valMap) <- get
-    case Map.lookup (token ^. lexeme) valMap of
-      Just _ -> put (Values $ Map.insert (token ^. lexeme) code valMap)
-      Nothing -> throwError $ RuntimeError token ("Undefined variable '" <> token ^. lexeme <> "'.")
+    let putVal (Environment valMap env) =
+          case Map.lookup (token ^. lexeme) valMap of
+            Just _ -> pure $ Environment (Map.insert (token ^. lexeme) code valMap) env
+            Nothing -> case env of
+              Just env' -> do
+                val <- putVal env'
+                pure $ Environment valMap (Just val)
+              Nothing -> throwError $ RuntimeError token ("Undefined variable '" <> token ^. lexeme <> "'.")
+    env <- get
+    finalVal <- putVal env
+    put finalVal
+  getEnv = get
+  setEnv = put
 
 isTruthy :: Code -> Bool
 isTruthy VoidValue = False
@@ -111,6 +129,11 @@ evaluate (Binary left token right) = do
     (t, _, _) -> throwError $ RuntimeError t "Token in wrong place"
 
 execute :: (MonadError ErrorType m, MonadEnvironment m, MonadIO m) => Stmt -> m ()
+execute (Block ss) = do
+  env <- getEnv
+  setEnv $ Environment Map.empty $ Just env
+  void $ traverse execute ss `catchError` \e -> setEnv env >> throwError e
+  setEnv env
 execute (Print expr) = do
   x <- evaluate expr
   liftIO $ print $ show x

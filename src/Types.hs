@@ -100,7 +100,8 @@ data Expr = Assign Token Expr
           | Variable Token
           deriving Show
 
-data Stmt = Expression Expr
+data Stmt = Block [Stmt]
+          | Expression Expr
           | Print Expr
           | Var Token (Maybe Expr)
           | EmptyStatement
@@ -114,6 +115,7 @@ printAstStmt (Expression expr) = printAst expr
 printAstStmt (Print expr) = parenthesize "print" [expr]
 printAstStmt (Var (Token _ lexeme' _ _) expr) = parenthesize ("var " <> lexeme') $ catMaybes [expr]
 printAstStmt EmptyStatement = "ErrorStmt"
+printAstStmt (Block ss) = "'(" <> T.intercalate " " (printAstStmt <$> ss) <> ")"
 
 printAst :: Expr -> T.Text
 printAst (Binary left operator right) = parenthesize
@@ -126,6 +128,7 @@ printAst (Literal (NumericLiteral n)) = T.pack $ show n
 printAst (Literal (BooleanLiteral b)) = T.pack $ show b
 printAst (Unary operator right) = parenthesize (operator ^. lexeme) [right]
 printAst (Variable token) = token ^. lexeme
+printAst (Assign token expr) = parenthesize ("= " <> token ^. lexeme) [expr]
 
 testAstPrinter :: T.Text
 testAstPrinter = printAst $ Binary

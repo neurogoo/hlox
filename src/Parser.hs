@@ -53,6 +53,16 @@ instance (Monad m) => MonadParser (StateT Parser m) where
 
 type ParserConstrains m = (Monad m, MonadParser m, MonadError (Token, T.Text) m)
 
+check :: ParserConstrains m => TokenType -> m Bool
+check tt = do
+  p <- peek
+  pure $ p ^. tokenType == tt
+
+isAtEnd :: ParserConstrains m => m Bool
+isAtEnd = do
+  p <- peek
+  pure $ p ^. tokenType == Eof
+
 throwParseError :: (MonadParser m, MonadError (Token,T.Text) m) => (Token, T.Text) -> m a
 throwParseError err = do
   parseError err
@@ -126,7 +136,25 @@ statement = do
   x <- match PRINT
   case x of
     Left _ -> printStatement
-    _ -> expressionStatement
+    _ -> do
+      x' <- match LeftBrace
+      case x' of
+        Left _ -> Block <$> block
+        _ -> expressionStatement
+
+block :: ParserConstrains m => m [Stmt]
+block = do
+  let getStatements ss = do
+        a <- check RightBrace
+        b <- isAtEnd
+        if not a && not b then do
+          s <- declaration
+          getStatements (ss <> [s])
+        else
+          pure ss
+  ss <- getStatements []
+  void $ consume RightBrace "Expect '}' after block."
+  pure $ ss
 
 printStatement :: ParserConstrains m => m Stmt
 printStatement = do

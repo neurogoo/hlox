@@ -207,7 +207,7 @@ run sourceString = do
       pure $ Just $ HadParseError
     Right ss -> do
 --      print $ show ss
-      x <- liftIO $ runExceptT $ flip runStateT (Values Map.empty) $ interpret ss
+      x <- liftIO $ runExceptT $ flip runStateT (Environment Map.empty Nothing) $ interpret ss
       case x of
         Left err -> do
           _ <- Main.error err
