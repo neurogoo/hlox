@@ -10,6 +10,7 @@ import Data.List
 import Control.Monad.State.Strict
 import Control.Lens
 import Data.Maybe (fromMaybe)
+import Debug.Trace
 
 import Types
 
@@ -35,7 +36,7 @@ instance Show Code where
 data Environment = Environment
   { values    :: !(Map.Map T.Text Code)
   , enclosing :: !(Maybe Environment)
-  }
+  } deriving Show
 
 class MonadEnvironment m where
   define      :: T.Text -> Code -> m ()
@@ -102,6 +103,14 @@ evaluate (Assign token expr) = do
   value <- evaluate expr
   assignValue token value
   pure value
+evaluate (Logical left operator right) = do
+  l <- evaluate left
+  let res =
+        case operator ^. tokenType of
+          Or -> if isTruthy l then Just l else Nothing
+          _ -> if not $ isTruthy l then Just l else Nothing
+  maybe (evaluate right) pure res
+
 evaluate (Binary left token right) = do
   l <- evaluate left
   r <- evaluate right
@@ -132,8 +141,10 @@ execute :: (MonadError ErrorType m, MonadEnvironment m, MonadIO m) => Stmt -> m 
 execute (Block ss) = do
   env <- getEnv
   setEnv $ Environment Map.empty $ Just env
-  void $ traverse execute ss `catchError` \e -> setEnv env >> throwError e
-  setEnv env
+  void $ traverse execute ss `catchError`
+    \e -> getEnv >>= setEnv . fromMaybe env . enclosing >> throwError e
+  env' <- getEnv
+  setEnv $ fromMaybe env' $ enclosing env'
 execute (Print expr) = do
   x <- evaluate expr
   liftIO $ print $ show x
@@ -142,7 +153,18 @@ execute (Var token initializer) = do
   value <- traverse evaluate initializer
   define (token ^. lexeme) $ fromMaybe VoidValue value
   pure ()
-execute EmptyStatement = error "Can't execute error statement"
+execute (If expr thenstmt elsestmt) = do
+  e <- evaluate expr
+  if isTruthy e then
+    execute thenstmt
+  else
+    void $ traverse execute elsestmt
+execute (While condition body) = do
+  c <- evaluate condition
+  when (isTruthy c) $ do
+    execute body
+    execute $ While condition body
+execute (ReplExpression expr) = execute $ Print expr
 
 interpret :: (MonadError ErrorType m, MonadEnvironment m, MonadIO m) => [Stmt] -> m ()
 interpret ss = void $ traverse execute ss

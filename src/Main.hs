@@ -168,13 +168,13 @@ scanToken = do
 scanTokens :: T.Text -> Writer [(Int, T.Text)] [Token]
 scanTokens sourceString = go [] initialState
   where
-    go tokens (ScanState _ _ line' "") = do
-      pure $ catMaybes tokens <> [endToken line']
-    go tokens scanState = do
+    go tokens' (ScanState _ _ line' "") = do
+      pure $ catMaybes tokens' <> [endToken line']
+    go tokens' scanState = do
       let ((token, state'), errors') =
             runIdentity $ runWriterT $ flip runStateT scanState $ scanToken
       tell $ fmap (\(a,b) -> (a, T.pack b)) errors'
-      go (tokens <> [token]) state'
+      go (tokens' <> [token]) state'
     initialState = ScanState
       { _start = 0
       , _current = 0
@@ -189,21 +189,21 @@ data HadError = HadParseError
 runFile :: String -> IO ()
 runFile filename = do
   fileData <- Data.Text.IO.readFile filename
-  hadError <- run fileData
+  hadError <- run Compile fileData
   case hadError of
     Nothing -> pure ()
     Just HadRuntimeError -> exitWith (ExitFailure 70)
     _ -> exitWith (ExitFailure 65)
 
-run :: T.Text -> IO (Maybe HadError)
-run sourceString = do
-  let (tokens', errors) = runWriter $ scanTokens sourceString
-  forM_ errors $ \(l,e) -> Main.error $ ScanError l e
---  forM_ tokens' $ \token -> do
---    print token
-  case parse tokens' of
-    Left (token, message) -> do
-      _ <- Main.error $ ParserError token message
+run :: CompilerMode -> T.Text -> IO (Maybe HadError)
+run mode sourceString = do
+  let (tokens', errors') = runWriter $ scanTokens sourceString
+  forM_ errors' $ \(l,e) -> Main.error $ ScanError l e
+  -- forM_ tokens' $ \token -> do
+  --   print token
+  case parse mode tokens' of
+    Left parseErrors' -> do
+      _ <- traverse Main.error $ (uncurry ParserError) <$> parseErrors'
       pure $ Just $ HadParseError
     Right ss -> do
 --      print $ show ss
@@ -212,14 +212,14 @@ run sourceString = do
         Left err -> do
           _ <- Main.error err
           pure $ Just HadRuntimeError
-        Right _ -> pure $ if null errors then Nothing else Just HadParseError
+        Right _ -> pure $ if null errors' then Nothing else Just HadParseError
 
 runPrompt :: IO ()
 runPrompt = forever $ do
   putStr "> "
   hFlush stdout
   userInput <- getLine
-  run $ T.pack userInput
+  run Repl $ T.pack userInput
 
 main :: IO ()
 main = do
