@@ -6,6 +6,7 @@ import Control.Lens
 import Data.Maybe (catMaybes)
 import Data.List
 import Data.IORef
+import Control.Monad.Trans
 
 import qualified Data.Text as T
 import qualified Data.Map as Map
@@ -102,6 +103,7 @@ data Expr = Assign Token Expr
           | Binary Expr Token Expr
           | Call Expr Token [Expr]
           | Grouping Expr
+          | Lambda [Token] [Stmt] --need some token for errors?
           | Literal LiteralType
           | Logical Expr Token Expr
           | Unary Token Expr
@@ -122,11 +124,16 @@ data Stmt = Block [Stmt]
 data Environment = GlobalEnvironment (IORef (Map.Map T.Text Code))
                  | Environment (IORef (Map.Map T.Text Code)) Environment
 
-data LoxFunction = LoxFunction Token [Token] [Stmt] Environment
+applyToEnv :: (MonadIO m) => (Map.Map T.Text Code -> Map.Map T.Text Code) -> Environment -> m ()
+applyToEnv f (GlobalEnvironment valMap) = liftIO $ modifyIORef' valMap f
+applyToEnv f (Environment valMap _) = liftIO $ modifyIORef' valMap f
+
+data LoxFunction = LoxFunction (Maybe Token) [Token] [Stmt] Environment
                  | NativeFunction Int ([Code] -> IO Code) T.Text
 
 instance Show LoxFunction where
-  show (LoxFunction n _ _ _ ) = "<fn " <> T.unpack (n ^. lexeme) <> ">"
+  show (LoxFunction (Just n) _ _ _ ) = "<fn " <> T.unpack (n ^. lexeme) <> ">"
+  show (LoxFunction _ _ _ _) = "<anonymous fn>"
   show (NativeFunction _ _ s) = T.unpack s
 
 -- TODO is this needed?
@@ -188,6 +195,10 @@ printAst (Binary left operator right) = parenthesize
     [left, right]
 printAst (Call callee _ arguments) = parenthesize (printAst callee) arguments
 printAst (Grouping expr) = parenthesize "group" [expr]
+printAst (Lambda arguments body) =
+  parenthesizeStmt
+  ("fun " <> (T.intercalate " " $ fmap (^. lexeme) arguments))
+  body
 printAst (Literal EmptyLiteral) = "nil"
 printAst (Literal (TextLiteral t)) = t
 printAst (Literal (NumericLiteral n)) = T.pack $ show n

@@ -38,13 +38,7 @@ class MonadEnvironment m where
 instance ( Monad m
          , MonadError ErrorType m
          , MonadIO m) => MonadEnvironment (StateT Environment m) where
-  define name code = do
-    env <- get
-    case env of
-      GlobalEnvironment valMap ->
-        liftIO $ modifyIORef' valMap (Map.insert name code)
-      Environment valMap enclosing ->
-        liftIO $ modifyIORef' valMap (Map.insert name code)
+  define name code = get >>= applyToEnv (Map.insert name code)
   getValue token = do
     let lookupEnv (Environment valMap enclosing) = do
           valMap' <- liftIO $ readIORef valMap
@@ -120,6 +114,10 @@ evaluate (Call callee paren arguments) = do
         "Expected " <> show (arity function) <> " arguments but got " <> show (length arguments) <> "."
       call function arguments'
     _ -> throwError $ RuntimeError paren "Can only call functions and classes."
+evaluate (Lambda arguments body) = do
+  env <- getEnv
+  let function = LoxFunction Nothing arguments body env
+  pure $ FunctionValue function
 evaluate (Literal (NumericLiteral n)) = pure $ NumValue n
 evaluate (Literal (TextLiteral t)) = pure $ TextValue t
 evaluate (Literal (BooleanLiteral b)) = pure $ BoolValue b
@@ -187,7 +185,7 @@ execute (Print expr) = do
 execute (Expression expr) = void $ evaluate expr
 execute (Function fname arguments body) = do
   env <- getEnv
-  let function = LoxFunction fname arguments body env
+  let function = LoxFunction (Just fname) arguments body env
   define (fname ^. lexeme) $ FunctionValue function
 execute (Var token initializer) = do
   value <- traverse evaluate initializer

@@ -156,9 +156,8 @@ declaration = sequence [go] `catchError` const (synchronize >> pure [])
                   ]
       maybe statement pure m
 
-function :: ParserConstrains m => FunctionType -> m Stmt
-function kind = do
-  name <- consume IDENTIFIER $ T.pack $ "Expect " <> show kind <> " name."
+functionBody :: ParserConstrains m => FunctionType -> m ([Token], [Stmt])
+functionBody kind = do
   void $ consume LeftParen $ T.pack $ "Expect '(' after " <> show kind <> " name."
   let go parameters = do
         when (length parameters >= 255) $
@@ -177,7 +176,18 @@ function kind = do
   void $ consume RightParen "Expect ')' after parameters."
   void $ consume LeftBrace $ T.pack $ "Expect '{' before " <> show kind <> " body."
   body <- block
+  pure (parameters, body)
+
+function :: ParserConstrains m => FunctionType -> m Stmt
+function kind = do
+  name <- consume IDENTIFIER $ T.pack $ "Expect " <> show kind <> " name."
+  (parameters, body) <- functionBody kind
   pure $ Function name parameters body
+
+lambda :: ParserConstrains m => m Expr
+lambda = do
+  (parameters, body) <- functionBody FunctionType
+  pure $ Lambda parameters body
 
 varDeclaration :: ParserConstrains m => m Stmt
 varDeclaration = do
@@ -389,6 +399,7 @@ primary = do
               , matchWith String (\(Token _ _ (Just l) _ ) -> pure $ Literal l)
               , matchWith IDENTIFIER (pure . Variable)
               , matchWith LeftParen (const $ func)
+              , matchWith FUN (const $ lambda)
               ]
   case x of
     Just expr -> pure expr
