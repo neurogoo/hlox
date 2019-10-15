@@ -1,4 +1,4 @@
-# Lox interpreter writen with Haskell
+# Lox interpreter written with Haskell
 
 ## Building
 

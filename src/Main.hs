@@ -16,6 +16,7 @@ import Data.Maybe (catMaybes)
 import Debug.Trace
 import Text.Read (readMaybe)
 import Control.Monad.Except
+import Data.IORef
 
 import Types
 import Parser
@@ -160,7 +161,7 @@ scanToken = do
           (identifier, _) <- process isAlphaNumeric xs [x]
           case Map.lookup (T.pack identifier) keywords of
             Just v -> pure $ Just $ Token v (T.pack identifier) Nothing line'
-            Nothing -> pure $ Just $ Token Identifier (T.pack identifier) Nothing line'
+            Nothing -> pure $ Just $ Token IDENTIFIER (T.pack identifier) Nothing line'
     _ -> do
       tell [(line', "Unexpected character.")]
       pure Nothing
@@ -199,15 +200,19 @@ run :: CompilerMode -> T.Text -> IO (Maybe HadError)
 run mode sourceString = do
   let (tokens', errors') = runWriter $ scanTokens sourceString
   forM_ errors' $ \(l,e) -> Main.error $ ScanError l e
-  -- forM_ tokens' $ \token -> do
-  --   print token
+--  forM_ tokens' $ \token -> do
+--    print token
   case parse mode tokens' of
     Left parseErrors' -> do
       _ <- traverse Main.error $ (uncurry ParserError) <$> parseErrors'
       pure $ Just $ HadParseError
     Right ss -> do
 --      print $ show ss
-      x <- liftIO $ runExceptT $ flip runStateT (Environment Map.empty Nothing) $ interpret ss
+      newMap <- liftIO (newIORef (Map.fromList [("clock", FunctionValue clock)] ))
+      x <- liftIO $
+        runExceptT $
+        flip runStateT (GlobalEnvironment newMap) $
+        interpret ss
       case x of
         Left err -> do
           _ <- Main.error err

@@ -6,12 +6,10 @@
 module Parser where
 
 import Control.Lens
-import Data.Maybe (listToMaybe)
+import Data.Maybe
 import Control.Monad.State.Strict
 import Debug.Trace
-import Control.Applicative
 import Control.Monad.Except
-import Data.Foldable
 
 import Types
 
@@ -153,14 +151,37 @@ declaration :: ParserConstrains m => m [Stmt]
 declaration = sequence [go] `catchError` const (synchronize >> pure [])
   where
     go = do
-      m <- match VAR
-      case m of
-        Left _ -> varDeclaration
-        _ -> statement
+      m <- myAsum [ matchWith VAR $ const varDeclaration
+                  , matchWith FUN $ const $ function FunctionType
+                  ]
+      maybe statement pure m
+
+function :: ParserConstrains m => FunctionType -> m Stmt
+function kind = do
+  name <- consume IDENTIFIER $ T.pack $ "Expect " <> show kind <> " name."
+  void $ consume LeftParen $ T.pack $ "Expect '(' after " <> show kind <> " name."
+  let go parameters = do
+        when (length parameters >= 255) $
+          peek >>= \p -> throwParseError (p, "Cannot have more than 255 parameters.")
+        identifier <- consume IDENTIFIER "Expect parameter name."
+        x <- match Comma
+        case x of
+          Left _ -> go (parameters <> [identifier])
+          Right () -> pure $ parameters <> [identifier]
+  x <- check RightParen
+  parameters <-
+    if not x then
+      go []
+    else
+      pure []
+  void $ consume RightParen "Expect ')' after parameters."
+  void $ consume LeftBrace $ T.pack $ "Expect '{' before " <> show kind <> " body."
+  body <- block
+  pure $ Function name parameters body
 
 varDeclaration :: ParserConstrains m => m Stmt
 varDeclaration = do
-  name <- consume Identifier "Expect variable name."
+  name <- consume IDENTIFIER "Expect variable name."
   m <- match Equal
   initializer <-
     case m of
@@ -169,16 +190,36 @@ varDeclaration = do
   void $ consume Semicolon "Expect ';' after variable declaration."
   pure $ Var name initializer
 
+myAsum :: ParserConstrains m => [m (Maybe a)] -> m (Maybe a)
+myAsum = go
+  where
+    go (x : xs) = do
+      x' <- x
+      case x' of
+        Just x'' -> pure $ Just x''
+        Nothing -> go xs
+    go [] = pure Nothing
+
 statement :: ParserConstrains m => m Stmt
 statement = do
-  x <- asum <$> sequence [ matchWith For $ const forStatement
-                         , matchWith IF $ const ifStatement
-                         , matchWith PRINT $ const printStatement
-                         , matchWith WHILE $ const whileStatement
-                         , matchWith LeftBrace $ const (Block <$> block) ]
-  case x of
-    Just x' -> pure x'
-    Nothing -> expressionStatement
+  x <- myAsum [ matchWith For $ const forStatement
+              , matchWith IF $ const ifStatement
+              , matchWith PRINT $ const printStatement
+              , matchWith RETURN $ returnStatement
+              , matchWith WHILE $ const whileStatement
+              , matchWith LeftBrace $ const (Block <$> block) ]
+  maybe expressionStatement pure x
+
+returnStatement :: ParserConstrains m => Token -> m Stmt
+returnStatement keyword = do
+  value <- do
+    c <- check Semicolon
+    if not c then
+      Just <$> expression
+    else
+      pure Nothing
+  void $ consume Semicolon "Expect ';' after return value."
+  pure $ Return keyword value
 
 block :: ParserConstrains m => m [Stmt]
 block = do
@@ -192,7 +233,7 @@ block = do
           pure ss
   ss <- getStatements []
   void $ consume RightBrace "Expect '}' after block."
-  pure $ ss
+  pure ss
 
 forStatement :: ParserConstrains m => m Stmt
 forStatement = do
@@ -208,7 +249,7 @@ forStatement = do
           Right _ -> Just <$> expressionStatement
   x' <- check Semicolon
   condition <-
-    if x' then
+    if not x' then
       Just <$> expression
     else
       pure Nothing
@@ -216,7 +257,7 @@ forStatement = do
 
   x'' <- check RightParen
   increment <-
-    if x'' then
+    if not x'' then
       Just <$> expression
     else
       pure Nothing
@@ -259,12 +300,12 @@ ifStatement = do
 printStatement :: ParserConstrains m => m Stmt
 printStatement = do
   value <- expression
-  _ <- consume Semicolon "Expect ';' after value."
+  void $ consume Semicolon "Expect ';' after value."
   pure $ Print value
 
 expressionStatement :: ParserConstrains m => m Stmt
 expressionStatement = do
-  value <- expression
+  value <- expression `catchError` (error . show)
   mode <- getParserMode
   case mode of
     Compile -> do
@@ -301,7 +342,39 @@ unary = do
       let operator = tt
       right <- unary
       pure $ Unary operator right
-    Right () -> primary
+    Right () -> call
+
+call :: ParserConstrains m => m Expr
+call = do
+  let go expr = do
+        x <- match LeftParen
+        case x of
+          Left _ -> do
+            finishCall expr >>= go
+          _ -> pure expr
+  expr <- primary
+  go expr
+
+finishCall :: ParserConstrains m => Expr -> m Expr
+finishCall callee = do
+  let go arguments = do
+        e <- expression
+        x <- match Comma
+        case x of
+          Left _ -> do
+            when (length arguments >= 255) $ do
+              p <- peek
+              parseError (p, "Cannot have more than 255 arguments.")
+            go (arguments <> [e])
+          _ -> pure (arguments <> [e])
+  x <- check RightParen
+  arguments <-
+    if not x then
+      go []
+    else
+      pure []
+  paren <- consume RightParen "Expect ')' after arguments."
+  pure $ Call callee paren arguments
 
 primary :: ParserConstrains m => m Expr
 primary = do
@@ -309,19 +382,19 @@ primary = do
         expr <- expression
         void $ consume RightParen "Expect ')' after expression."
         pure $ Grouping expr
-  x <- asum <$> sequence [ matchWith FALSE (const $ pure $ Literal $ BooleanLiteral False)
-                         , matchWith TRUE (const $ pure $ Literal $ BooleanLiteral True)
-                         , matchWith Nil (const $ pure $ Literal $ EmptyLiteral)
-                         , matchWith Number (\(Token _ _ (Just l) _ ) -> pure $ Literal l)
-                         , matchWith String (\(Token _ _ (Just l) _ ) -> pure $ Literal l)
-                         , matchWith Identifier (pure . Variable)
-                         , matchWith LeftParen (const $ func)
-                         ]
+  x <- myAsum [ matchWith FALSE (const $ pure $ Literal $ BooleanLiteral False)
+              , matchWith TRUE (const $ pure $ Literal $ BooleanLiteral True)
+              , matchWith Nil (const $ pure $ Literal $ EmptyLiteral)
+              , matchWith Number (\(Token _ _ (Just l) _ ) -> pure $ Literal l)
+              , matchWith String (\(Token _ _ (Just l) _ ) -> pure $ Literal l)
+              , matchWith IDENTIFIER (pure . Variable)
+              , matchWith LeftParen (const $ func)
+              ]
   case x of
     Just expr -> pure expr
     Nothing -> do
       p <- peek
-      throwParseError (p, "Couldn't find matching primary for token")
+      traceShow (p ^. tokenLine) $ throwParseError (p, "Couldn't find matching primary for token")
 
 parse :: CompilerMode -> [Token] -> Either [(Token, T.Text)] [Stmt]
 parse mode ts = either (Left . pure) processNonCatchedErrors returnValue
@@ -350,14 +423,14 @@ synchronize = do
         _ -> do
           current <- peek
           case current ^. tokenType of
-            Class -> pure ()
-            Fun -> pure ()
+            CLASS -> pure ()
+            FUN -> pure ()
             VAR -> pure ()
             For -> pure ()
             IF -> pure ()
             WHILE -> pure ()
             PRINT -> pure ()
-            Return -> pure ()
+            RETURN -> pure ()
             _ -> do
               t'' <- advance
               go $ t'' ^. tokenType

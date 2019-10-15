@@ -4,6 +4,8 @@ module Types where
 
 import Control.Lens
 import Data.Maybe (catMaybes)
+import Data.List
+import Data.IORef
 
 import qualified Data.Text as T
 import qualified Data.Map as Map
@@ -14,12 +16,13 @@ data LiteralType = TextLiteral T.Text
                  | EmptyLiteral
                  deriving Show
 
-data ErrorType = ScanError Int T.Text
-               | ParserError Token T.Text
-               | RuntimeError Token T.Text
-
 data CompilerMode = Repl
                   | Compile
+
+data FunctionType = FunctionType
+
+instance Show FunctionType where
+  show FunctionType = "function"
 
 instance Show Token where
   show (Token tokenType lexeme literal _) =
@@ -44,20 +47,20 @@ data TokenType = LeftParen -- Single character tokens
                | GreaterEqual
                | Less
                | LessEqual
-               | Identifier -- literals
+               | IDENTIFIER -- literals
                | String
                | Number
                | And -- keywords
-               | Class
+               | CLASS
                | Else
                | FALSE
-               | Fun
+               | FUN
                | For
                | IF
                | Nil
                | Or
                | PRINT
-               | Return
+               | RETURN
                | Super
                | This
                | TRUE
@@ -78,16 +81,16 @@ makeLenses ''Token
 keywords :: Map.Map T.Text TokenType
 keywords = Map.fromList
   [ ("and", And)
-  , ("class", Class)
+  , ("class", CLASS)
   , ("else", Else)
   , ("false", FALSE)
   , ("for", For)
-  , ("fun", Fun)
+  , ("fun", FUN)
   , ("if", IF)
   , ("nil", Nil)
   , ("or", Or)
   , ("print", PRINT)
-  , ("return", Return)
+  , ("return", RETURN)
   , ("super", Super)
   , ("this", This)
   , ("true", TRUE)
@@ -97,6 +100,7 @@ keywords = Map.fromList
 
 data Expr = Assign Token Expr
           | Binary Expr Token Expr
+          | Call Expr Token [Expr]
           | Grouping Expr
           | Literal LiteralType
           | Logical Expr Token Expr
@@ -106,12 +110,51 @@ data Expr = Assign Token Expr
 
 data Stmt = Block [Stmt]
           | Expression Expr
+          | Function Token [Token] [Stmt]
           | If Expr Stmt (Maybe Stmt)
           | Print Expr
+          | Return Token (Maybe Expr)
           | Var Token (Maybe Expr)
           | While Expr Stmt
           | ReplExpression Expr
           deriving Show
+
+data Environment = GlobalEnvironment (IORef (Map.Map T.Text Code))
+                 | Environment (IORef (Map.Map T.Text Code)) Environment
+
+data LoxFunction = LoxFunction Token [Token] [Stmt] Environment
+                 | NativeFunction Int ([Code] -> IO Code) T.Text
+
+instance Show LoxFunction where
+  show (LoxFunction n _ _ _ ) = "<fn " <> T.unpack (n ^. lexeme) <> ">"
+  show (NativeFunction _ _ s) = T.unpack s
+
+-- TODO is this needed?
+instance Eq LoxFunction where
+  _ == _ = False
+
+data Code = BoolValue Bool
+          | NumValue Double
+          | TextValue T.Text
+          | VoidValue
+          | FunctionValue LoxFunction
+          deriving Eq
+
+instance Show Code where
+  show (BoolValue b) = show b
+  show (NumValue n) = let s = show n
+                      in if isSuffixOf ".0" s then
+                           take (length s - 2) s
+                         else
+                           s
+  show (TextValue t) = T.unpack t
+  show (FunctionValue func) = show func
+  show VoidValue = "nil"
+
+data ErrorType = ScanError Int T.Text
+               | ParserError Token T.Text
+               | RuntimeError Token T.Text
+               | ReturnValue Code
 
 parenthesize :: T.Text -> [Expr] -> T.Text
 parenthesize name exprs = "(" <> name <> " " <> T.intercalate " " (printAst <$> exprs) <> " )"
@@ -121,6 +164,10 @@ parenthesizeStmt name exprs = "(" <> name <> " " <> T.intercalate " " (printAstS
 
 printAstStmt :: Stmt -> T.Text
 printAstStmt (Expression expr) = printAst expr
+printAstStmt (Function fname arguments body) =
+  parenthesizeStmt
+  ("fun " <> fname ^. lexeme <> (T.intercalate " " $ fmap (^. lexeme) arguments))
+  body
 printAstStmt (Print expr) = parenthesize "print" [expr]
 printAstStmt (Var (Token _ lexeme' _ _) expr) = parenthesize ("var " <> lexeme') $ catMaybes [expr]
 printAstStmt (Block ss) = "'(" <> T.intercalate " " (printAstStmt <$> ss) <> ")"
@@ -133,11 +180,13 @@ printAstStmt (If expr stmt1 stmt2) =
 printAstStmt (While expr body) = "( while " <> T.intercalate " " [ printAst expr
                                                                  , printAstStmt body] <> ")"
 printAstStmt (ReplExpression expr) = printAst expr
+printAstStmt (Return _ expr) = parenthesize "return" $ maybe [] pure expr
 
 printAst :: Expr -> T.Text
 printAst (Binary left operator right) = parenthesize
     (operator ^. lexeme)
     [left, right]
+printAst (Call callee _ arguments) = parenthesize (printAst callee) arguments
 printAst (Grouping expr) = parenthesize "group" [expr]
 printAst (Literal EmptyLiteral) = "nil"
 printAst (Literal (TextLiteral t)) = t
