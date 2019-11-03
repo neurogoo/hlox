@@ -15,12 +15,12 @@ data LiteralType = TextLiteral T.Text
                  | NumericLiteral Double
                  | BooleanLiteral Bool
                  | EmptyLiteral
-                 deriving Show
+                 deriving (Eq, Ord, Show)
 
 data CompilerMode = Repl
                   | Compile
 
-data FunctionType = FunctionType
+data FunctionType = FunctionType deriving Eq
 
 instance Show FunctionType where
   show FunctionType = "function"
@@ -75,7 +75,7 @@ data Token = Token
   , _lexeme    :: !T.Text
   , _literal   :: !(Maybe LiteralType)
   , _tokenLine :: !Int
-  }
+  } deriving (Eq, Ord)
 
 makeLenses ''Token
 
@@ -108,7 +108,7 @@ data Expr = Assign Token Expr
           | Logical Expr Token Expr
           | Unary Token Expr
           | Variable Token
-          deriving Show
+          deriving (Eq, Ord, Show)
 
 data Stmt = Block [Stmt]
           | Expression Expr
@@ -119,7 +119,7 @@ data Stmt = Block [Stmt]
           | Var Token (Maybe Expr)
           | While Expr Stmt
           | ReplExpression Expr
-          deriving Show
+          deriving (Eq, Ord, Show)
 
 data Environment = GlobalEnvironment (IORef (Map.Map T.Text Code))
                  | Environment (IORef (Map.Map T.Text Code)) Environment
@@ -127,6 +127,14 @@ data Environment = GlobalEnvironment (IORef (Map.Map T.Text Code))
 applyToEnv :: (MonadIO m) => (Map.Map T.Text Code -> Map.Map T.Text Code) -> Environment -> m ()
 applyToEnv f (GlobalEnvironment valMap) = liftIO $ modifyIORef' valMap f
 applyToEnv f (Environment valMap _) = liftIO $ modifyIORef' valMap f
+
+liftToEnv :: (MonadIO m) => (Map.Map T.Text Code -> a) -> Environment -> m a
+liftToEnv f (GlobalEnvironment valMap) = f <$> (liftIO $ readIORef valMap)
+liftToEnv f (Environment valMap _) = f <$> (liftIO $ readIORef valMap)
+
+enclosingEnv :: Environment -> Environment
+enclosingEnv (Environment _ enc) = enc
+enclosingEnv e = e
 
 data LoxFunction = LoxFunction (Maybe Token) [Token] [Stmt] Environment
                  | NativeFunction Int ([Code] -> IO Code) T.Text

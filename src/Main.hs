@@ -21,6 +21,7 @@ import Data.IORef
 import Types
 import Parser
 import Interpreter
+import Resolver
 
 import qualified Data.Text as T
 import qualified Data.Map as Map
@@ -209,15 +210,21 @@ run mode sourceString = do
     Right ss -> do
 --      print $ show ss
       newMap <- liftIO (newIORef (Map.fromList [("clock", FunctionValue clock)] ))
-      x <- liftIO $
-        runExceptT $
-        flip runStateT (GlobalEnvironment newMap) $
-        interpret ss
-      case x of
+      resolveMap <-
+        runExceptT $ execWriterT $ flip runStateT (ResolverState [] Nothing) (resolveStmts ss)
+      case resolveMap of
         Left err -> do
-          _ <- Main.error err
+          void $ Main.error err
           pure $ Just HadRuntimeError
-        Right _ -> pure $ if null errors' then Nothing else Just HadParseError
+        Right rmap' -> do
+          x <- runExceptT $
+               flip runStateT (InterpreterState (GlobalEnvironment newMap) rmap') $
+               interpret ss
+          case x of
+            Left err -> do
+              _ <- Main.error err
+              pure $ Just HadRuntimeError
+            Right _ -> pure $ if null errors' then Nothing else Just HadParseError
 
 runPrompt :: IO ()
 runPrompt = forever $ do

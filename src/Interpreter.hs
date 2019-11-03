@@ -13,6 +13,7 @@ import Data.Time.Clock.POSIX
 import Data.IORef
 
 import Types
+import Resolver hiding (define)
 
 import qualified Data.Text as T
 import qualified Data.Map as Map
@@ -29,28 +30,24 @@ clock = NativeFunction
 
 class MonadEnvironment m where
   define      :: T.Text -> Code -> m ()
-  getValue    :: Token -> m Code
   assignValue :: Token -> Code -> m ()
   getEnv      :: m Environment
   setEnv      :: Environment -> m ()
   extendEnv   :: Map.Map T.Text Code -> m ()
+  lookUpVariable :: Token -> Expr -> m Code
+  assignVariable :: Expr -> Token -> Code -> m ()
+  getAt       :: Int -> T.Text -> m Code
+  assignAt    :: Int -> Token -> Code -> m ()
+
+data InterpreterState = InterpreterState
+  { intEnv    :: !Environment
+  , intLocals :: !(Map.Map Expr Int)
+  }
 
 instance ( Monad m
          , MonadError ErrorType m
-         , MonadIO m) => MonadEnvironment (StateT Environment m) where
-  define name code = get >>= applyToEnv (Map.insert name code)
-  getValue token = do
-    let lookupEnv (Environment valMap enclosing) = do
-          valMap' <- liftIO $ readIORef valMap
-          maybe (lookupEnv enclosing) pure $ Map.lookup (token ^. lexeme) valMap'
-        lookupEnv (GlobalEnvironment valMap) = do
-          valMap' <- liftIO $ readIORef valMap
-          case Map.lookup (token ^. lexeme) valMap' of
-            Just c -> pure c
-            Nothing ->
-              throwError $ RuntimeError token ("Undefined variable '" <> token ^. lexeme <> "'.")
-    env <- get
-    lookupEnv env
+         , MonadIO m) => MonadEnvironment (StateT InterpreterState m) where
+  define name code = gets intEnv >>= applyToEnv (Map.insert name code)
   assignValue token code = do
     let putVal (Environment valMap enc) = do
           valMap' <- liftIO $ readIORef valMap
@@ -62,14 +59,46 @@ instance ( Monad m
           case Map.lookup (token ^. lexeme) valMap' of
             Just _ -> liftIO $ modifyIORef' valMap (Map.insert (token ^. lexeme) code)
             Nothing -> throwError $ RuntimeError token ("Undefined variable '" <> token ^. lexeme <> "'.")
-    env <- get
+    env <- gets intEnv
     putVal env
-  getEnv = get
-  setEnv = put
+  getEnv = gets intEnv
+  setEnv env = do
+    InterpreterState _ locals <- get
+    put $ InterpreterState env locals
   extendEnv valMap = do
     newMap <- liftIO (newIORef valMap)
-    env <- get
-    put (Environment newMap env)
+    InterpreterState env locals <- get
+    put $ InterpreterState (Environment newMap env) locals
+  lookUpVariable name expr = do
+    InterpreterState env locals <- get
+    let distance = Map.lookup expr locals
+    case distance of
+      Just d -> getAt d (name ^. lexeme)
+      Nothing -> do
+        mcode <- liftToEnv (Map.lookup (name ^. lexeme)) (getGlobalEnv env)
+        case mcode of
+          Just code -> pure code
+          Nothing -> throwError $ RuntimeError name ("Undefined variable '" <> name ^. lexeme <> "'.")
+  getAt distance name = do
+    env <- gets intEnv
+    ansEnv <- (liftToEnv id (ancestor distance env))
+    case (Map.lookup name) ansEnv of
+      Just c -> pure c
+      Nothing -> error "Shouldn't happen"--throwError $ RuntimeError name ("Undefined variable '" <> name ^. lexeme <> "'.")
+  assignVariable expr name value = do
+    InterpreterState env locals <- get
+    let distance = Map.lookup expr locals
+    case distance of
+      Just d -> assignAt d name value
+      Nothing -> applyToEnv (Map.insert (name ^. lexeme) value) (getGlobalEnv env)
+  assignAt distance name value = do
+    env <- gets intEnv
+    let ansEnv = ancestor distance env
+    applyToEnv (Map.insert (name ^. lexeme) value) ansEnv
+
+ancestor :: Int -> Environment -> Environment
+ancestor d env | d > 0     = ancestor (d - 1) (enclosingEnv env)
+               | otherwise = env
 
 getGlobalEnv :: Environment -> Environment
 getGlobalEnv (Environment _ enc) = getGlobalEnv enc
@@ -132,7 +161,7 @@ evaluate (Unary (Token Bang _ _ _) right) = do
   r <- evaluate right
   pure $ BoolValue $ not $ isTruthy r
 evaluate (Unary _ _) = pure $ VoidValue
-evaluate (Variable token) = getValue token
+evaluate v@(Variable token) = lookUpVariable token v
 evaluate (Assign token expr) = do
   value <- evaluate expr
   assignValue token value
